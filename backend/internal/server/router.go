@@ -33,6 +33,8 @@ func SetupRouter(
 	cfg *config.Config,
 	redisClient *redis.Client,
 ) *gin.Engine {
+	serveAdmin := cfg == nil || cfg.Server.ServesAdmin()
+
 	// 缓存 iframe 页面的 origin 列表，用于动态注入 CSP frame-src
 	var cachedFrameOrigins atomic.Pointer[[]string]
 	emptyOrigins := []string{}
@@ -61,8 +63,9 @@ func SetupRouter(
 		return nil
 	}))
 
-	// Serve embedded frontend with settings injection if available
-	if web.HasEmbeddedFrontend() {
+	// Serve embedded frontend with settings injection if available.
+	// API-only deployments intentionally skip the SPA/admin surface.
+	if serveAdmin && web.HasEmbeddedFrontend() {
 		frontendServer, err := web.NewFrontendServer(settingService)
 		if err != nil {
 			log.Printf("Warning: Failed to create frontend server with settings injection: %v, using legacy mode", err)
@@ -103,13 +106,15 @@ func registerRoutes(
 	// 通用路由（健康检查、状态等）
 	routes.RegisterCommonRoutes(r)
 
-	// API v1
-	v1 := r.Group("/api/v1")
+	if cfg == nil || cfg.Server.ServesAdmin() {
+		v1 := r.Group("/api/v1")
+		routes.RegisterAuthRoutes(v1, h, jwtAuth, redisClient, settingService)
+		routes.RegisterUserRoutes(v1, h, jwtAuth, settingService)
+		routes.RegisterAdminRoutes(v1, h, adminAuth)
+		routes.RegisterPaymentRoutes(v1, h.Payment, h.PaymentWebhook, h.Admin.Payment, jwtAuth, adminAuth, settingService)
+	}
 
-	// 注册各模块路由
-	routes.RegisterAuthRoutes(v1, h, jwtAuth, redisClient, settingService)
-	routes.RegisterUserRoutes(v1, h, jwtAuth, settingService)
-	routes.RegisterAdminRoutes(v1, h, adminAuth)
-	routes.RegisterGatewayRoutes(r, h, apiKeyAuth, apiKeyService, subscriptionService, opsService, settingService, cfg)
-	routes.RegisterPaymentRoutes(v1, h.Payment, h.PaymentWebhook, h.Admin.Payment, jwtAuth, adminAuth, settingService)
+	if cfg == nil || cfg.Server.ServesAPI() {
+		routes.RegisterGatewayRoutes(r, h, apiKeyAuth, apiKeyService, subscriptionService, opsService, settingService, cfg)
+	}
 }

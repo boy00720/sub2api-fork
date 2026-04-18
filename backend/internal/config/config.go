@@ -19,6 +19,12 @@ const (
 	RunModeSimple   = "simple"
 )
 
+const (
+	ServerRoleAll   = "all"
+	ServerRoleAdmin = "admin"
+	ServerRoleAPI   = "api"
+)
+
 // 使用量记录队列溢出策略
 const (
 	UsageRecordOverflowPolicyDrop   = "drop"
@@ -246,6 +252,7 @@ type ServerConfig struct {
 	Host               string    `mapstructure:"host"`
 	Port               int       `mapstructure:"port"`
 	Mode               string    `mapstructure:"mode"`                  // debug/release
+	Role               string    `mapstructure:"role"`                  // all/admin/api
 	FrontendURL        string    `mapstructure:"frontend_url"`          // 前端基础 URL，用于生成邮件中的外部链接
 	ReadHeaderTimeout  int       `mapstructure:"read_header_timeout"`   // 读取请求头超时（秒）
 	IdleTimeout        int       `mapstructure:"idle_timeout"`          // 空闲连接超时（秒）
@@ -691,6 +698,44 @@ func (s *ServerConfig) Address() string {
 	return fmt.Sprintf("%s:%d", s.Host, s.Port)
 }
 
+func NormalizeServerRole(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", ServerRoleAll:
+		return ServerRoleAll
+	case ServerRoleAdmin:
+		return ServerRoleAdmin
+	case ServerRoleAPI:
+		return ServerRoleAPI
+	default:
+		return strings.ToLower(strings.TrimSpace(value))
+	}
+}
+
+func (s *ServerConfig) EffectiveRole() string {
+	if s == nil {
+		return ServerRoleAll
+	}
+	return NormalizeServerRole(s.Role)
+}
+
+func (s *ServerConfig) ServesAdmin() bool {
+	switch s.EffectiveRole() {
+	case ServerRoleAll, ServerRoleAdmin:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *ServerConfig) ServesAPI() bool {
+	switch s.EffectiveRole() {
+	case ServerRoleAll, ServerRoleAPI:
+		return true
+	default:
+		return false
+	}
+}
+
 // DatabaseConfig 数据库连接配置
 // 性能优化：新增连接池参数，避免频繁创建/销毁连接
 type DatabaseConfig struct {
@@ -972,6 +1017,9 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	// 环境变量支持
 	viper.AutomaticEnv()
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	if err := viper.BindEnv("server.role", "APP_ROLE", "SERVER_ROLE"); err != nil {
+		return nil, fmt.Errorf("bind server.role env: %w", err)
+	}
 
 	// 默认值
 	setDefaults()
@@ -993,6 +1041,7 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	if cfg.Server.Mode == "" {
 		cfg.Server.Mode = "debug"
 	}
+	cfg.Server.Role = NormalizeServerRole(cfg.Server.Role)
 	cfg.Server.FrontendURL = strings.TrimSpace(cfg.Server.FrontendURL)
 	cfg.JWT.Secret = strings.TrimSpace(cfg.JWT.Secret)
 	cfg.LinuxDo.ClientID = strings.TrimSpace(cfg.LinuxDo.ClientID)
@@ -1113,6 +1162,7 @@ func setDefaults() {
 	viper.SetDefault("server.host", "0.0.0.0")
 	viper.SetDefault("server.port", 8080)
 	viper.SetDefault("server.mode", "release")
+	viper.SetDefault("server.role", ServerRoleAll)
 	viper.SetDefault("server.frontend_url", "")
 	viper.SetDefault("server.read_header_timeout", 30) // 30秒读取请求头
 	viper.SetDefault("server.idle_timeout", 120)       // 120秒空闲超时
@@ -1233,8 +1283,8 @@ func setDefaults() {
 	viper.SetDefault("database.password", "postgres")
 	viper.SetDefault("database.dbname", "sub2api")
 	viper.SetDefault("database.sslmode", "prefer")
-	viper.SetDefault("database.max_open_conns", 256)
-	viper.SetDefault("database.max_idle_conns", 128)
+	viper.SetDefault("database.max_open_conns", 50)
+	viper.SetDefault("database.max_idle_conns", 10)
 	viper.SetDefault("database.conn_max_lifetime_minutes", 30)
 	viper.SetDefault("database.conn_max_idle_time_minutes", 5)
 
@@ -1246,8 +1296,8 @@ func setDefaults() {
 	viper.SetDefault("redis.dial_timeout_seconds", 5)
 	viper.SetDefault("redis.read_timeout_seconds", 3)
 	viper.SetDefault("redis.write_timeout_seconds", 3)
-	viper.SetDefault("redis.pool_size", 1024)
-	viper.SetDefault("redis.min_idle_conns", 128)
+	viper.SetDefault("redis.pool_size", 128)
+	viper.SetDefault("redis.min_idle_conns", 10)
 	viper.SetDefault("redis.enable_tls", false)
 
 	// Ops (vNext)
@@ -1578,6 +1628,11 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("server.frontend_url invalid: must not include userinfo")
 		}
 		warnIfInsecureURL("server.frontend_url", c.Server.FrontendURL)
+	}
+	switch NormalizeServerRole(c.Server.Role) {
+	case ServerRoleAll, ServerRoleAdmin, ServerRoleAPI:
+	default:
+		return fmt.Errorf("server.role must be one of: all/admin/api")
 	}
 	if c.JWT.ExpireHour <= 0 {
 		return fmt.Errorf("jwt.expire_hour must be positive")

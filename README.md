@@ -200,6 +200,8 @@ curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install
 
 Deploy with Docker Compose, including PostgreSQL and Redis containers.
 
+For split deployments where the admin site and `/v1/*` API run as separate services, see [Admin/API Split Deployment](docs/ADMIN_API_SPLIT_DEPLOYMENT.md).
+
 #### Prerequisites
 
 - Docker 20.10+

@@ -30,6 +30,63 @@ func TestLoadForBootstrapAllowsMissingJWTSecret(t *testing.T) {
 	}
 }
 
+func TestNormalizeServerRole(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"", ServerRoleAll},
+		{"all", ServerRoleAll},
+		{"ADMIN", ServerRoleAdmin},
+		{" api ", ServerRoleAPI},
+		{"invalid", "invalid"},
+	}
+
+	for _, tt := range tests {
+		if got := NormalizeServerRole(tt.input); got != tt.expected {
+			t.Fatalf("NormalizeServerRole(%q) = %q, want %q", tt.input, got, tt.expected)
+		}
+	}
+}
+
+func TestLoadServerRoleFromAppRoleEnv(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("APP_ROLE", "api")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.Server.EffectiveRole() != ServerRoleAPI {
+		t.Fatalf("Server role = %q, want %q", cfg.Server.EffectiveRole(), ServerRoleAPI)
+	}
+	if cfg.Server.ServesAdmin() {
+		t.Fatalf("ServesAdmin() = true, want false")
+	}
+	if !cfg.Server.ServesAPI() {
+		t.Fatalf("ServesAPI() = false, want true")
+	}
+}
+
+func TestValidateRejectsInvalidServerRole(t *testing.T) {
+	resetViperWithJWTSecret(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	cfg.Server.Role = "sidecar"
+	err = cfg.Validate()
+	if err == nil {
+		t.Fatalf("Validate() expected error for invalid server.role, got nil")
+	}
+	if !strings.Contains(err.Error(), "server.role") {
+		t.Fatalf("Validate() error = %v, want server.role error", err)
+	}
+}
+
 func TestNormalizeRunMode(t *testing.T) {
 	tests := []struct {
 		input    string
@@ -1675,5 +1732,27 @@ func TestLoad_DefaultGatewayUsageRecordConfig(t *testing.T) {
 	}
 	if cfg.Gateway.UsageRecord.AutoScaleCooldownSeconds != 10 {
 		t.Fatalf("auto_scale_cooldown_seconds = %d, want 10", cfg.Gateway.UsageRecord.AutoScaleCooldownSeconds)
+	}
+}
+
+func TestLoad_DefaultInfraPoolConfig(t *testing.T) {
+	resetViperWithJWTSecret(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.Database.MaxOpenConns != 50 {
+		t.Fatalf("database.max_open_conns = %d, want 50", cfg.Database.MaxOpenConns)
+	}
+	if cfg.Database.MaxIdleConns != 10 {
+		t.Fatalf("database.max_idle_conns = %d, want 10", cfg.Database.MaxIdleConns)
+	}
+	if cfg.Redis.PoolSize != 128 {
+		t.Fatalf("redis.pool_size = %d, want 128", cfg.Redis.PoolSize)
+	}
+	if cfg.Redis.MinIdleConns != 10 {
+		t.Fatalf("redis.min_idle_conns = %d, want 10", cfg.Redis.MinIdleConns)
 	}
 }
