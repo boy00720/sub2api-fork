@@ -540,6 +540,27 @@ func TestFrontendServer_Middleware(t *testing.T) {
 
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Contains(t, w.Header().Get("Content-Type"), "image/png")
+		assert.Equal(t, staticImmutableCache, w.Header().Get("Cache-Control"))
+	})
+
+	t.Run("serves_hashed_assets_with_immutable_cache", func(t *testing.T) {
+		provider := &mockSettingsProvider{
+			settings: map[string]string{"test": "value"},
+		}
+
+		server, err := NewFrontendServer(provider)
+		require.NoError(t, err)
+
+		router := gin.New()
+		router.Use(server.Middleware())
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/assets/index-DU9U9Rhy.js", nil)
+		router.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Contains(t, w.Header().Get("Content-Type"), "javascript")
+		assert.Equal(t, staticImmutableCache, w.Header().Get("Cache-Control"))
 	})
 }
 
@@ -594,6 +615,7 @@ func TestServeEmbeddedFrontend(t *testing.T) {
 
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Contains(t, w.Header().Get("Content-Type"), "image/png")
+		assert.Equal(t, staticImmutableCache, w.Header().Get("Cache-Control"))
 	})
 
 	t.Run("serves_index_html_for_root", func(t *testing.T) {
@@ -664,6 +686,16 @@ func TestServeEmbeddedFrontend(t *testing.T) {
 				assert.True(t, nextCalled, "next handler should be called for API route")
 			})
 		}
+	})
+}
+
+func TestIsImmutableStaticAsset(t *testing.T) {
+	t.Run("matches_hashed_and_known_static_assets", func(t *testing.T) {
+		assert.True(t, isImmutableStaticAsset("assets/index.js"))
+		assert.True(t, isImmutableStaticAsset("logo.png"))
+		assert.True(t, isImmutableStaticAsset("favicon.ico"))
+		assert.False(t, isImmutableStaticAsset("index.html"))
+		assert.False(t, isImmutableStaticAsset("robots.txt"))
 	})
 }
 

@@ -4,9 +4,12 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"database/sql"
 	_ "embed"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -24,6 +27,8 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/web"
 
 	"github.com/gin-gonic/gin"
+	_ "github.com/lib/pq"
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 )
@@ -37,6 +42,13 @@ var (
 	Commit    = "unknown"
 	Date      = "unknown"
 	BuildType = "source" // "source" for manual builds, "release" for CI builds (set by ldflags)
+)
+
+const (
+	startupDependencyMaxWait        = 75 * time.Second
+	startupDependencyPingTimeout    = 5 * time.Second
+	startupDependencyInitialBackoff = 2 * time.Second
+	startupDependencyMaxBackoff     = 10 * time.Second
 )
 
 func init() {
@@ -139,6 +151,9 @@ func runMainServer() {
 	if cfg.RunMode == config.RunModeSimple {
 		log.Println("⚠️  WARNING: Running in SIMPLE mode - billing and quota checks are DISABLED")
 	}
+	if err := waitForStartupDependencies(cfg); err != nil {
+		log.Fatalf("Failed waiting for startup dependencies: %v", err)
+	}
 
 	buildInfo := handler.BuildInfo{
 		Version:   Version,
@@ -175,4 +190,98 @@ func runMainServer() {
 	}
 
 	log.Println("Server exited")
+}
+
+func waitForStartupDependencies(cfg *config.Config) error {
+	if err := waitForPostgres(cfg); err != nil {
+		return err
+	}
+	if err := waitForRedis(cfg); err != nil {
+		return err
+	}
+	return nil
+}
+
+func waitForPostgres(cfg *config.Config) error {
+	db, err := sql.Open("postgres", cfg.Database.DSNWithTimezone(cfg.Timezone))
+	if err != nil {
+		return fmt.Errorf("open PostgreSQL connection: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	defer func() { _ = db.Close() }()
+
+	return waitForDependency("PostgreSQL", fmt.Sprintf("%s:%d", cfg.Database.Host, cfg.Database.Port), startupDependencyMaxWait, func(ctx context.Context) error {
+		return db.PingContext(ctx)
+	})
+}
+
+func waitForRedis(cfg *config.Config) error {
+	opts := &redis.Options{
+		Addr:         cfg.Redis.Address(),
+		Password:     cfg.Redis.Password,
+		DB:           cfg.Redis.DB,
+		DialTimeout:  time.Duration(cfg.Redis.DialTimeoutSeconds) * time.Second,
+		ReadTimeout:  time.Duration(cfg.Redis.ReadTimeoutSeconds) * time.Second,
+		WriteTimeout: time.Duration(cfg.Redis.WriteTimeoutSeconds) * time.Second,
+		PoolSize:     1,
+		MinIdleConns: 0,
+	}
+	if cfg.Redis.EnableTLS {
+		opts.TLSConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			ServerName: cfg.Redis.Host,
+		}
+	}
+
+	client := redis.NewClient(opts)
+	defer func() { _ = client.Close() }()
+
+	return waitForDependency("Redis", cfg.Redis.Address(), startupDependencyMaxWait, func(ctx context.Context) error {
+		return client.Ping(ctx).Err()
+	})
+}
+
+func waitForDependency(name string, target string, maxWait time.Duration, check func(context.Context) error) error {
+	deadline := time.Now().Add(maxWait)
+	backoff := startupDependencyInitialBackoff
+	attempt := 1
+	var lastErr error
+
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), startupDependencyPingTimeout)
+		err := check(ctx)
+		cancel()
+		if err == nil {
+			if attempt > 1 {
+				log.Printf("%s became ready after %d attempts (%s)", name, attempt, target)
+			}
+			return nil
+		}
+
+		lastErr = err
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("%s at %s did not become ready within %s: %w", name, target, maxWait, lastErr)
+		}
+
+		sleepFor := minDuration(backoff, remaining)
+		log.Printf("%s not ready yet (attempt %d, target %s): %v; retrying in %s", name, attempt, target, err, sleepFor)
+		time.Sleep(sleepFor)
+
+		if backoff < startupDependencyMaxBackoff {
+			backoff *= 2
+			if backoff > startupDependencyMaxBackoff {
+				backoff = startupDependencyMaxBackoff
+			}
+		}
+		attempt++
+	}
+}
+
+func minDuration(a time.Duration, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }
